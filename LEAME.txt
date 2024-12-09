@@ -1,0 +1,12 @@
+Instrucciones de uso:
+
+1. Descomprima la carpeta "Eventos_de_Amenaza"
+2. La primera vez que use la aplicación:
+   - Ejecute "setup.bat" y espere a que termine la instalación
+   - Este paso solo es necesario la primera vez
+3. Para usar la aplicación:
+   - Ejecute "launch.bat"
+   - Se abrirá automáticamente en su navegador
+4. Para cerrar la aplicación:
+   - Cierre la ventana del navegador
+   - Cierre la ventana negra de comando
