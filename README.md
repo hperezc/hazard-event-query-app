@@ -23,7 +23,7 @@ App_EventosAmenaza es una aplicación de escritorio desarrollada con Python y Da
 
 ### Instalación
 1. Descarga el repositorio completo
-2. Ejecuta el archivo `install.bat`
+2. Ejecuta el archivo `setup.bat`
 3. Espera a que se complete la instalación
 
 ### Ejecución
@@ -35,7 +35,7 @@ App_EventosAmenaza es una aplicación de escritorio desarrollada con Python y Da
 App_EventosAmenaza/
 ├── app.py # Aplicación principal
 ├── python/ # Entorno Python portable
-├── install.bat # Script de instalación
+├── setup.bat # Script de instalación
 ├── launch.bat # Script de ejecución
 └── README.md # Documentación
 
@@ -63,7 +63,7 @@ App_EventosAmenaza is a desktop application developed with Python and Dash to vi
 
 ### Installation
 1. Download the complete repository
-2. Run `install.bat`
+2. Run `setup.bat`
 3. Wait for the installation to complete
 
 ### Execution
@@ -75,7 +75,7 @@ App_EventosAmenaza is a desktop application developed with Python and Dash to vi
 App_EventosAmenaza/
 ├── app.py # Main application
 ├── python/ # Portable Python environment
-├── install.bat # Installation script
+├── setup.bat # Installation script
 ├── launch.bat # Execution script
 └── README.md # Documentation
 
