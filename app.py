@@ -11,12 +11,17 @@ import plotly.graph_objects as go
 from sqlalchemy import create_engine
 import os
 from dotenv import load_dotenv
-import unicodedata
 from sqlalchemy.exc import SQLAlchemyError
 from functools import lru_cache
 import numpy as np
 import math
 import socket
+from municipio_utils import (
+    construir_opciones_municipio,
+    crear_clave_municipio,
+    crear_etiqueta_municipio,
+    parsear_municipio_fuente,
+)
 
 def is_port_in_use(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -56,12 +61,11 @@ GRAPH_LAYOUT = {
     'hovermode': 'closest'
 }
 
-
-# Agrega esta línea cerca del inicio de tu script, después de las importaciones
-mapbox_access_token = 'pk.eyJ1IjoiaHBlcmV6Yzk3IiwiYSI6ImNtMm92ZWRzZTBrNTkybnBydGkydzJyajMifQ.ng34bPCD2cV5eNBnBMiCXg'
-
 # Cargar variables de entorno
 load_dotenv()
+
+MAPBOX_ACCESS_TOKEN = os.getenv('MAPBOX_ACCESS_TOKEN')
+MAPBOX_STYLE = "light" if MAPBOX_ACCESS_TOKEN else "carto-positron"
 
 # Configuración de la conexión a PostgreSQL
 DB_USER = os.getenv('DB_USER')
@@ -94,7 +98,7 @@ def cargar_datos():
     try:
         # Cargar municipios
         query_municipios = """
-        SELECT "MpNombre", ST_Transform(geometry, 4326) as geometry 
+        SELECT "MpNombre", "Depto", ST_Transform(geometry, 4326) as geometry 
         FROM municipios
         """
         gdf_municipios = gpd.GeoDataFrame.from_postgis(
@@ -164,37 +168,60 @@ gdf_municipios, df_eventos_municipio, gdf_eventos_shp = cargar_datos()
 # Prueba con diferentes valores hasta encontrar el equilibrio adecuado
 gdf_municipios['geometry'] = gdf_municipios['geometry'].simplify(tolerance=0.003)
 
-gdf_municipios = gdf_municipios[['MpNombre', 'geometry']]  # Mantén solo las columnas necesarias
+gdf_municipios = gdf_municipios[['MpNombre', 'Depto', 'geometry']].copy()
+gdf_municipios['municipio_clave'] = gdf_municipios.apply(
+    lambda row: crear_clave_municipio(row['Depto'], row['MpNombre']),
+    axis=1
+)
+gdf_municipios['municipio_label'] = gdf_municipios.apply(
+    lambda row: crear_etiqueta_municipio(row['Depto'], row['MpNombre']),
+    axis=1
+)
+gdf_municipios = gdf_municipios.drop_duplicates(subset=['municipio_clave']).copy()
 
-# Modificar la función obtener_municipios_unicos
-def obtener_municipios_unicos():
-    try:
-        query = """
-        SELECT DISTINCT "MUNICIPIO" FROM (
-            SELECT "MUNICIPIO" FROM eventos_ungrd
-            UNION
-            SELECT "MUNICIPIO" FROM eventos_dagran
-        ) as municipios
-        WHERE "MUNICIPIO" IS NOT NULL
-        """
-        with engine.connect().execution_options(timeout=10) as conn:
-            municipios = pd.read_sql(query, conn)['MUNICIPIO'].unique()
-        return sorted([mun.split('/')[1].strip() if '/' in mun else mun for mun in municipios])
-    except SQLAlchemyError as e:
-        print(f"Error al obtener municipios: {str(e)}")
-        return []
 
-municipios_unicos = obtener_municipios_unicos()
+def enriquecer_catalogo_municipios(df_eventos):
+    departamentos = []
+    municipios_base = []
+    municipios_clave = []
+    municipios_label = []
 
-def normalizar_texto(texto):
-    """
-    Elimina tildes y convierte a mayúsculas
-    """
-    if pd.isna(texto):
-        return texto
-    texto_sin_tildes = ''.join(c for c in unicodedata.normalize('NFD', str(texto))
-                              if unicodedata.category(c) != 'Mn')
-    return texto_sin_tildes.upper().strip()
+    for municipio, fuente in df_eventos[['MUNICIPIO', 'FUENTE']].itertuples(index=False, name=None):
+        departamento_predeterminado = 'Antioquia' if fuente == 'DAGRAN' else None
+        departamento, municipio_base = parsear_municipio_fuente(municipio, departamento_predeterminado)
+
+        departamentos.append(departamento)
+        municipios_base.append(municipio_base)
+
+        if departamento and municipio_base:
+            municipios_clave.append(crear_clave_municipio(departamento, municipio_base))
+            municipios_label.append(crear_etiqueta_municipio(departamento, municipio_base))
+        else:
+            municipios_clave.append(None)
+            municipios_label.append(municipio_base)
+
+    df_eventos = df_eventos.copy()
+    df_eventos['DEPARTAMENTO'] = departamentos
+    df_eventos['MUNICIPIO_BASE'] = municipios_base
+    df_eventos['MUNICIPIO_CLAVE'] = municipios_clave
+    df_eventos['MUNICIPIO_LABEL'] = municipios_label
+    return df_eventos
+
+
+df_eventos_municipio = enriquecer_catalogo_municipios(df_eventos_municipio)
+
+catalogo_dropdown_municipios = pd.concat([
+    gdf_municipios[['Depto', 'MpNombre']].rename(columns={'Depto': 'DEPARTAMENTO', 'MpNombre': 'MUNICIPIO'}),
+    df_eventos_municipio[['DEPARTAMENTO', 'MUNICIPIO_BASE']].rename(columns={'MUNICIPIO_BASE': 'MUNICIPIO'})
+], ignore_index=True).dropna().drop_duplicates()
+
+municipios_dropdown_options = construir_opciones_municipio(
+    catalogo_dropdown_municipios[['DEPARTAMENTO', 'MUNICIPIO']].itertuples(index=False, name=None)
+)
+municipios_por_clave = {
+    opcion['value']: opcion['label']
+    for opcion in municipios_dropdown_options
+}
 
 def normalizar_tipo_evento(tipo):
     """
@@ -354,10 +381,12 @@ sidebar = html.Div([
                 html.I(className="fas fa-map-marker-alt me-2"),  # Icono para Municipio
                 "Selecciona un municipio"
             ], html_for="municipio-input", className="mb-2 text-secondary fw-bold d-flex align-items-center"),
-            dbc.Input(
+            dcc.Dropdown(
                 id="municipio-input",
-                type="text",
-                placeholder="Nombre del municipio",
+                options=municipios_dropdown_options,
+                placeholder="Busca un municipio o departamento",
+                searchable=True,
+                clearable=True,
                 className="mb-3",
                 style={'border-radius': '6px'}
             )
@@ -946,7 +975,7 @@ def actualizar_graficos(municipio, tipos_seleccionados, fuentes_seleccionadas):
                    px.imshow([[0]], title="No hay datos disponibles"),
                    px.line(title="No hay datos disponibles"))
 
-        municipio_norm = normalizar_texto(municipio)
+        municipio_label = municipios_por_clave.get(municipio, municipio)
         
         # Filtrar eventos del municipio seleccionado por cada fuente
         eventos_ungrd = pd.DataFrame()
@@ -955,18 +984,18 @@ def actualizar_graficos(municipio, tipos_seleccionados, fuentes_seleccionadas):
 
         if 'UNGRD' in fuentes_seleccionadas:
             eventos_ungrd = df_eventos_municipio[
-                (df_eventos_municipio['MUNICIPIO'].apply(normalizar_texto).str.contains(municipio_norm, case=False, na=False)) & 
+                (df_eventos_municipio['MUNICIPIO_CLAVE'] == municipio) & 
                 (df_eventos_municipio['FUENTE'] == 'UNGRD')
             ].copy()
 
         if 'DAGRAN' in fuentes_seleccionadas:
             eventos_dagran = df_eventos_municipio[
-                (df_eventos_municipio['MUNICIPIO'].apply(normalizar_texto).str.contains(municipio_norm, case=False, na=False)) & 
+                (df_eventos_municipio['MUNICIPIO_CLAVE'] == municipio) & 
                 (df_eventos_municipio['FUENTE'] == 'DAGRAN')
             ].copy()
 
         if 'SIMMA' in fuentes_seleccionadas:
-            municipio_geom = gdf_municipios[gdf_municipios['MpNombre'].apply(normalizar_texto).str.contains(municipio_norm, case=False)].geometry
+            municipio_geom = gdf_municipios[gdf_municipios['municipio_clave'] == municipio].geometry
             if not municipio_geom.empty:
                 eventos_simma = gdf_eventos_shp[gdf_eventos_shp.geometry.within(municipio_geom.iloc[0])].copy()
                 eventos_simma['FUENTE'] = 'SIMMA'
@@ -978,7 +1007,7 @@ def actualizar_graficos(municipio, tipos_seleccionados, fuentes_seleccionadas):
         ])
 
         if df_total_municipio.empty:
-            return (f"No se encontraron eventos para {municipio}", crear_mapa_colombia(), 
+            return (f"No se encontraron eventos para {municipio_label}", crear_mapa_colombia(municipio), 
                    px.bar(), px.pie(), px.bar(), px.line(), None, None,
                    px.imshow([[0]], title="No hay datos disponibles"),
                    px.bar(title="No hay datos disponibles"),
@@ -1012,7 +1041,7 @@ def actualizar_graficos(municipio, tipos_seleccionados, fuentes_seleccionadas):
         fig_correlacion = crear_matriz_correlacion(df_total_municipio)
         fig_tendencias = crear_grafico_tendencias(df_total_municipio)
 
-        return (f"Total de eventos en {municipio}: {total_eventos}",
+        return (f"Total de eventos en {municipio_label}: {total_eventos}",
                 fig_mapa, fig_eventos_tipo, fig_fuente_datos,
                 fig_eventos_tipo_fuente, fig_serie_tiempo,
                 tabla_resumen, tabla_detallada,
@@ -1073,20 +1102,25 @@ def descargar_detalle(n_clicks_excel, n_clicks_csv, tabla_detallada):
 
 # Agregar una función para contar eventos por municipio
 def contar_eventos_por_municipio(df_eventos_municipio, gdf_eventos_shp, gdf_municipios):
-    # Contar eventos del DataFrame
-    eventos_df = df_eventos_municipio['MUNICIPIO'].value_counts().reset_index()
-    eventos_df.columns = ['MpNombre', 'Eventos']
+    # Contar eventos tabulares usando una clave exacta municipio-departamento
+    eventos_df = (
+        df_eventos_municipio.dropna(subset=['MUNICIPIO_CLAVE'])
+        .groupby('MUNICIPIO_CLAVE')
+        .size()
+        .reset_index(name='Eventos')
+        .rename(columns={'MUNICIPIO_CLAVE': 'municipio_clave'})
+    )
     
     # Contar eventos del GeoDataFrame
     eventos_shp = gdf_eventos_shp.sjoin(gdf_municipios, how="inner", predicate="within")
-    eventos_shp = eventos_shp['MpNombre'].value_counts().reset_index()
-    eventos_shp.columns = ['MpNombre', 'Eventos']
+    eventos_shp = eventos_shp['municipio_clave'].value_counts().reset_index()
+    eventos_shp.columns = ['municipio_clave', 'Eventos']
     
     # Combinar ambos conteos
-    eventos_total = pd.concat([eventos_df, eventos_shp]).groupby('MpNombre').sum().reset_index()
+    eventos_total = pd.concat([eventos_df, eventos_shp]).groupby('municipio_clave').sum().reset_index()
     
-    # Merge con gdf_municipios
-    gdf_municipios_eventos = gdf_municipios.merge(eventos_total, on='MpNombre', how='left')
+    # Merge con gdf_municipios para conservar la geometría correcta
+    gdf_municipios_eventos = gdf_municipios.merge(eventos_total, on='municipio_clave', how='left')
     gdf_municipios_eventos['Eventos'] = gdf_municipios_eventos['Eventos'].fillna(0)
     
     # Calcular el área en km²
@@ -1125,22 +1159,23 @@ def crear_mapa_colombia(municipio_seleccionado=None):
 
         # Configuración inicial del mapa
         layout_inicial = dict(
-            mapbox_style="light",
+            mapbox_style=MAPBOX_STYLE,
             mapbox=dict(
-                accesstoken=mapbox_access_token,
                 center={"lat": 4.5709, "lon": -74.2973},
                 zoom=4
             ),
             margin={"r":0,"t":0,"l":0,"b":0},
             uirevision='constant'  # Mantener el estado del UI entre actualizaciones
         )
+
+        if MAPBOX_ACCESS_TOKEN:
+            layout_inicial['mapbox']['accesstoken'] = MAPBOX_ACCESS_TOKEN
         
         fig.update_layout(layout_inicial)
         
         if municipio_seleccionado:
-            municipio_norm = normalizar_texto(municipio_seleccionado)
             municipio_geom = gdf_municipios_eventos[
-                gdf_municipios_eventos['MpNombre'].apply(normalizar_texto).str.contains(municipio_norm, case=False)
+                gdf_municipios_eventos['municipio_clave'] == municipio_seleccionado
             ]
             
             if not municipio_geom.empty:
@@ -1290,16 +1325,14 @@ def crear_grafico_estacionalidad(df):
             paper_bgcolor='white',
             font={'color': COLORS['secondary'], 'size': 12},
             xaxis=dict(
-                title='Mes',
-                titlefont_size=12,
-                tickfont_size=10,
+                title=dict(text='Mes', font=dict(size=12)),
+                tickfont=dict(size=10),
                 gridcolor='rgba(0,0,0,0.1)',
                 showgrid=True
             ),
             yaxis=dict(
-                title='Número de eventos',
-                titlefont_size=12,
-                tickfont_size=10,
+                title=dict(text='Número de eventos', font=dict(size=12)),
+                tickfont=dict(size=10),
                 gridcolor='rgba(0,0,0,0.1)',
                 showgrid=True
             ),
@@ -1392,16 +1425,14 @@ def crear_grafico_tendencias(df):
             paper_bgcolor='white',
             font={'color': COLORS['secondary'], 'size': 12},
             xaxis=dict(
-                title='Año',
-                titlefont_size=12,
-                tickfont_size=10,
+                title=dict(text='Año', font=dict(size=12)),
+                tickfont=dict(size=10),
                 gridcolor='rgba(0,0,0,0.1)',
                 showgrid=True
             ),
             yaxis=dict(
-                title='Número de eventos',
-                titlefont_size=12,
-                tickfont_size=10,
+                title=dict(text='Número de eventos', font=dict(size=12)),
+                tickfont=dict(size=10),
                 gridcolor='rgba(0,0,0,0.1)',
                 showgrid=True
             ),
@@ -1531,17 +1562,15 @@ def crear_grafico_eventos_tipo_fuente(df):
             paper_bgcolor='white',
             font={'color': COLORS['secondary'], 'size': 12},
             xaxis=dict(
-                title='Tipo de Evento',
-                titlefont_size=12,
-                tickfont_size=10,
+                title=dict(text='Tipo de Evento', font=dict(size=12)),
+                tickfont=dict(size=10),
                 tickangle=-45,
                 gridcolor='rgba(0,0,0,0.1)',
                 showgrid=True
             ),
             yaxis=dict(
-                title='Número de eventos',
-                titlefont_size=12,
-                tickfont_size=10,
+                title=dict(text='Número de eventos', font=dict(size=12)),
+                tickfont=dict(size=10),
                 gridcolor='rgba(0,0,0,0.1)',
                 showgrid=True
             ),
